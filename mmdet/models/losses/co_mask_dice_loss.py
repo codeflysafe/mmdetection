@@ -1,12 +1,13 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import torch
 import torch.nn as nn
-
+import torch.nn.functional as F
 from ..builder import LOSSES
 from .utils import weight_reduce_loss
 
 
 def co_dice_loss(pred,
+              label_matrixs,
               weight=None,
               eps=1e-3,
               reduction='mean',
@@ -40,17 +41,23 @@ def co_dice_loss(pred,
             the loss. Defaults to None.
     """
 
-    input = pred.flatten(1)
-    a = torch.matmul(input, input.t())
+    batch, num_grid, h, w = pred.shape
+    input = pred.reshape(batch, num_grid, -1)
+    a = torch.matmul(input, input.permute(0,2,1))
     if naive_dice:
         b = torch.sum(input, 1).view(1, -1)
         d = (2 * a + eps) / (b + b.t() + eps)
     else:
-        b = torch.sum(input * input, 1) + eps
-        d = (2 * a) / (b + b.t())
-    
-    batch = d.shape[0]
-    loss = (d.sum() - batch)/(batch ** 2)
+        b = torch.matmul(input , torch.ones(h, w)) + eps
+        c = b[:,:, None] + b[:,None,:]
+        d = 2 * a/ c
+    # 只取上三角矩阵
+    d = torch.triu(d, diagonal=1)
+    # ground truth
+    gt = label_matrixs.reshape(batch, -1)
+    pred_d = d.reshape(batch, -1)
+    # 是一个分类问题
+    loss = F.binary_cross_entropy(pred_d, gt)
     if weight is not None:
         assert weight.ndim == loss.ndim
         assert len(weight) == len(pred)
@@ -99,6 +106,7 @@ class CoMaskDiceLoss(nn.Module):
 
     def forward(self,
                 pred,
+                label_matrixs,
                 weight=None,
                 reduction_override=None,
                 avg_factor=None):
@@ -129,10 +137,9 @@ class CoMaskDiceLoss(nn.Module):
                 pred = pred.sigmoid()
             else:
                 raise NotImplementedError
-        target = pred
         loss = self.loss_weight * co_dice_loss(
             pred,
-            target,
+            label_matrixs,
             weight,
             eps=self.eps,
             reduction=reduction,
